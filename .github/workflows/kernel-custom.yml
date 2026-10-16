@@ -206,7 +206,7 @@ on:
         required: false
         type: string
       ksu_commit_override:
-        description: "测试用：覆盖 KernelSU 检出的提交（留空=自动跟随最新 Release 的提交）"
+        description: "测试用：覆盖 KernelSU 检出的提交（留空=自动跟随上游分支最新 CI 构建的提交）"
         required: false
         type: string
         default: ""

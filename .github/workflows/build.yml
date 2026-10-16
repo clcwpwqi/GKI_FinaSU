@@ -542,9 +542,10 @@ jobs:
             "FinaSU")
               echo "添加 ${{ inputs.ksu_variant }}..."
               git clone https://github.com/LyraVoid/FinaSU.git KernelSU
-              # 内核侧检出到官方最新 Release 的同一提交（ksuCommit 由 get-manager
-              # 从 Release tag 解析；Kbuild 以 30000 + git 提交数 计算版本，与官方
-              # 发行管理器 versionCode 同源同值），保证与发行的管理器严格一致
+              # 内核侧检出到 FinaSU master 分支最新 CI 构建的同一提交（ksuCommit 由
+              # get-manager 从最新成功的 build-manager 构建解析；Kbuild 以 30000 +
+              # git 提交数 计算版本，与 CI 管理器 versionCode 同源同值），
+              # 保证内核与分发的管理器严格一致
               if [ -n "$KSU_COMMIT" ]; then
                 if ! git -C KernelSU checkout --detach "$KSU_COMMIT" 2>/dev/null; then
                   git -C KernelSU fetch origin "$KSU_COMMIT"
@@ -571,27 +572,39 @@ jobs:
               # 不注入时内核仅信任上游 KernelSU 默认槽，官方 KernelSU 管理器会抢占
               # manager 身份，FinaSU 管理器显示"未安装"。
               if [ -z "$KSU_CERT_SIZE" ] || [ -z "$KSU_CERT_HASH" ]; then
-                echo "管理器证书未由 get-manager 传入，回退到 FinaSU 最新 Release APK 提取..."
-                REL_APK=$(mktemp -d)/manager.apk
-                REL_JSON=""
+                echo "管理器证书未由 get-manager 传入，回退到 FinaSU master 分支最新 CI 管理器提取..."
+                REL_APK=$(mktemp -d)/manager.zip
+                CI_JSON=""
                 for ATTEMPT in 1 2 3; do
-                  REL_JSON=$(curl -s --fail --max-time 30 \
-                    "https://api.github.com/repos/LyraVoid/FinaSU/releases/latest") \
-                    && [ -n "$REL_JSON" ] && break
-                  echo "获取 Release 信息失败，重试 ($ATTEMPT/3)..."
+                  CI_JSON=$(curl -s --fail --max-time 30 \
+                    "https://api.github.com/repos/LyraVoid/FinaSU/actions/workflows/build-manager.yml/runs?status=success&branch=master&per_page=30") \
+                    && [ -n "$CI_JSON" ] && break
+                  echo "获取 FinaSU CI 构建列表失败，重试 ($ATTEMPT/3)..."
                   sleep 5
                 done
-                REL_URL=$(printf '%s' "$REL_JSON" | python3 -c \
-                  "import json,sys; d=json.load(sys.stdin); print(next(a['browser_download_url'] for a in d.get('assets',[]) if a['name'].endswith('.apk')))" 2>/dev/null || true)
-                if [ -z "$REL_URL" ]; then
-                  echo "::error::无法获取 FinaSU 管理器签名证书：get-manager 未传入且最新 Release 中没有 APK 资产，FinaSU 管理器将无法被内核识别"
+                CI_RUN=$(printf '%s' "$CI_JSON" | python3 -c \
+                  "import json,sys; d=json.load(sys.stdin); runs=[r for r in d.get('workflow_runs',[]) if r.get('event')=='push' and r.get('head_branch')=='master']; runs.sort(key=lambda r: r.get('created_at',''), reverse=True); print(runs[0]['id'] if runs else '')" 2>/dev/null || true)
+                CI_ART_URL=""
+                if [ -n "$CI_RUN" ]; then
+                  CI_ART_URL=$(curl -s --fail --max-time 30 \
+                    "https://api.github.com/repos/LyraVoid/FinaSU/actions/runs/$CI_RUN/artifacts" | python3 -c \
+                    "import json,sys; d=json.load(sys.stdin); print(next((a['archive_download_url'] for a in d.get('artifacts',[]) if a.get('name')=='manager' and not a.get('expired')), ''))" 2>/dev/null || true)
+                fi
+                if [ -z "$CI_ART_URL" ]; then
+                  echo "::error::无法获取 FinaSU 管理器签名证书：get-manager 未传入且 master CI 无可用管理器产物，FinaSU 管理器将无法被内核识别"
                   exit 1
                 fi
-                curl -sL --fail --retry 3 --max-time 300 -o "$REL_APK" "$REL_URL" || {
-                  echo "::error::下载 FinaSU Release APK 失败，无法提取管理器签名证书"
+                curl -sL --fail --retry 3 --max-time 300 -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -o "$REL_APK" "$CI_ART_URL" || {
+                  echo "::error::下载 FinaSU CI 管理器产物失败，无法提取管理器签名证书"
                   exit 1
                 }
-                CERT_INFO=$(python3 "$GITHUB_WORKSPACE/scripts/finasu_compat/extract_manager_cert.py" "$REL_APK" | head -n1)
+                unzip -oq "$REL_APK" -d "$(dirname "$REL_APK")" || true
+                CERT_APK=$(find "$(dirname "$REL_APK")" -type f -name "*.apk" ! -name "*debug*" | head -n 1)
+                if [ -z "$CERT_APK" ]; then
+                  echo "::error::FinaSU CI 管理器产物中未找到 APK，无法提取管理器签名证书"
+                  exit 1
+                fi
+                CERT_INFO=$(python3 "$GITHUB_WORKSPACE/scripts/finasu_compat/extract_manager_cert.py" "$CERT_APK" | head -n1)
                 KSU_CERT_SIZE=$(echo "$CERT_INFO" | awk '{print $1}')
                 KSU_CERT_HASH=$(echo "$CERT_INFO" | awk '{print $2}')
               fi
